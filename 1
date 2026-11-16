@@ -1,0 +1,297 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport"
+      content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>手机 AI 聊天</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: #111318;
+    color: #edf0f6;
+    font: 16px/1.6 system-ui, sans-serif;
+  }
+  .app {
+    max-width: 760px;
+    margin: auto;
+    height: 100vh;
+    height: 100dvh;
+    display: flex;
+    flex-direction: column;
+    padding: 12px;
+    padding-bottom: max(12px, env(safe-area-inset-bottom));
+    gap: 12px;
+  }
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  h1 { font-size: 19px; margin: 0; }
+  details {
+    background: #1c2029;
+    border-radius: 14px;
+    padding: 12px;
+  }
+  summary { cursor: pointer; }
+  .fields {
+    display: grid;
+    gap: 8px;
+    margin-top: 12px;
+    max-height: 40dvh;
+    overflow: auto;
+  }
+  label { display: grid; gap: 4px; font-size: 14px; }
+  input, select, textarea, button {
+    font: inherit;
+    border: 1px solid #394152;
+    border-radius: 10px;
+    color: inherit;
+    background: #151922;
+    padding: 10px 12px;
+    min-width: 0;
+  }
+  input, select { width: 100%; }
+  button {
+    cursor: pointer;
+    background: #365bd9;
+    border: none;
+    min-height: 44px;
+  }
+  button:disabled { opacity: .55; cursor: default; }
+  .secondary { background: #292f3d; }
+  small { color: #adb6c8; }
+  #chat {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+  .message {
+    padding: 12px 14px;
+    margin: 0 0 12px;
+    background: #1d2330;
+    border-radius: 14px;
+    overflow-wrap: anywhere;
+  }
+  .message.user { background: #263866; }
+  .message.error { background: #492931; }
+  .role { font-size: 12px; color: #bac5da; margin-bottom: 5px; }
+  .text { white-space: pre-wrap; }
+  form { display: flex; align-items: flex-end; gap: 8px; }
+  textarea {
+    flex: 1;
+    resize: vertical;
+    min-height: 52px;
+    max-height: 160px;
+  }
+  #status { min-height: 20px; font-size: 13px; color: #adb6c8; }
+</style>
+</head>
+<body>
+<main class="app">
+  <header>
+    <h1>手机 AI 聊天</h1>
+    <button id="clear" class="secondary" type="button">清空对话</button>
+  </header>
+
+  <details open id="settings">
+    <summary>接口设置</summary>
+    <div class="fields">
+      <label>API 地址
+        <input id="base" type="url"
+               placeholder="https://你的接口域名/v1"
+               autocomplete="off" spellcheck="false">
+      </label>
+      <label>API Key
+        <input id="key" type="password" placeholder="填写新生成的密钥"
+               autocomplete="off" spellcheck="false">
+      </label>
+      <label>模型名称
+        <input id="model" placeholder="填写服务商提供的模型 ID"
+               autocomplete="off" spellcheck="false">
+      </label>
+      <label>接口类型
+        <select id="type">
+          <option value="chat">Chat Completions</option>
+          <option value="responses">Responses</option>
+        </select>
+      </label>
+      <small>设置与对话仅保留在当前页面，刷新后清空。</small>
+    </div>
+  </details>
+
+  <section id="chat" aria-label="聊天记录" aria-live="polite"></section>
+  <div id="status" role="status">先填写接口设置，再发送消息。</div>
+
+  <form id="form">
+    <textarea id="prompt" rows="2" placeholder="输入消息……"
+              aria-label="消息" required></textarea>
+    <button id="send" type="submit">发送</button>
+    <button id="stop" type="button" class="secondary" hidden>停止</button>
+  </form>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+let history = [];
+let controller = null;
+
+function addMessage(role, text, error = false) {
+  const box = document.createElement("article");
+  box.className = "message " + (error ? "error" : role);
+
+  const label = document.createElement("div");
+  label.className = "role";
+  label.textContent = error ? "提示" : role === "user" ? "你" : "AI";
+
+  const content = document.createElement("div");
+  content.className = "text";
+  content.textContent = text;
+
+  box.append(label, content);
+  $("chat").append(box);
+  $("chat").scrollTop = $("chat").scrollHeight;
+}
+
+function busy(value) {
+  $("send").disabled = value;
+  $("clear").disabled = value;
+  $("stop").hidden = !value;
+}
+
+function extractText(data, type) {
+  if (type === "chat") {
+    const content = data.choices?.[0]?.message?.content;
+    if (typeof content === "string") return content;
+    if (Array.isArray(content)) {
+      return content.map(part => part.text || "").join("\n");
+    }
+    return "";
+  }
+  if (typeof data.output_text === "string") return data.output_text;
+  return (data.output || [])
+    .flatMap(item => item.content || [])
+    .filter(part => part.type === "output_text")
+    .map(part => part.text || "")
+    .join("\n");
+}
+
+$("form").addEventListener("submit", async event => {
+  event.preventDefault();
+  if (controller) return;
+
+  const text = $("prompt").value.trim();
+  const key = $("key").value.trim();
+  const model = $("model").value.trim();
+  const type = $("type").value;
+  const base = $("base").value.trim().replace(/\/+$/, "");
+
+  if (!text || !key || !model || !base) {
+    $("status").textContent = "请填写 API 地址、密钥、模型和消息。";
+    $("settings").open = true;
+    return;
+  }
+
+  let url;
+  try {
+    url = new URL(base);
+    if (url.protocol !== "https:") throw new Error();
+    if (url.username || url.password || url.search || url.hash) {
+      throw new Error();
+    }
+  } catch {
+    $("status").textContent = "请填写有效的 HTTPS API 基础地址。";
+    return;
+  }
+
+  const requestHistory = [...history, { role: "user", content: text }];
+  const endpoint = type === "chat" ? "/chat/completions" : "/responses";
+  const payload = type === "chat"
+    ? { model, messages: requestHistory, stream: false }
+    : { model, input: requestHistory, stream: false, store: false };
+
+  controller = new AbortController();
+  busy(true);
+  addMessage("user", text);
+  $("prompt").value = "";
+  $("settings").open = false;
+  $("status").textContent = "正在等待回复……";
+
+  try {
+    const response = await fetch(base + endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer " + key
+      },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+      credentials: "omit",
+      redirect: "error",
+      referrerPolicy: "no-referrer"
+    });
+
+    const raw = await response.text();
+    let data;
+    try { data = JSON.parse(raw); }
+    catch {
+      throw new Error(
+        `HTTP ${response.status}：服务端未返回有效 JSON，请检查地址和接口类型。`
+      );
+    }
+
+    if (!response.ok || data.error) {
+      const detail = typeof data.error === "string"
+        ? data.error
+        : data.error?.message || data.message || raw.slice(0, 600);
+
+      if (/client_not_allowed/i.test(raw)) {
+        throw new Error(
+          "client_not_allowed：服务商拒绝此客户端。网页设置无法解除该限制。"
+        );
+      }
+      throw new Error(`HTTP ${response.status}：${detail}`);
+    }
+
+    const answer = extractText(data, type);
+    if (!answer) {
+      throw new Error("接口返回成功，但没有可显示的文字，请检查模型和接口类型。");
+    }
+
+    history = [
+      ...requestHistory,
+      { role: "assistant", content: answer }
+    ];
+    addMessage("assistant", answer);
+    $("status").textContent = "回复完成。";
+  } catch (error) {
+    let message;
+    if (error.name === "AbortError") {
+      message = "已停止等待；服务端可能仍在处理请求。";
+    } else if (error instanceof TypeError) {
+      message = "连接失败：可能是网络、地址或服务商未允许浏览器跨域访问（CORS）。";
+    } else {
+      message = error.message;
+    }
+    addMessage("assistant", message, true);
+    $("status").textContent = "本次消息未加入后续对话。";
+    if (!$("prompt").value) $("prompt").value = text;
+  } finally {
+    controller = null;
+    busy(false);
+  }
+});
+
+$("stop").addEventListener("click", () => controller?.abort());
+
+$("clear").addEventListener("click", () => {
+  history = [];
+  $("chat").replaceChildren();
+  $("status").textContent = "对话已清空。";
+});
+</script>
+</body>
+</html>
